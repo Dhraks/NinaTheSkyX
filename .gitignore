@@ -1,0 +1,26 @@
+## Build outputs
+[Bb]in/
+[Oo]bj/
+build.log
+
+## Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.userprefs
+
+## NuGet
+packages/
+*.nupkg
+project.lock.json
+
+## Release artifacts (Package.ps1)
+bin/Release/*.zip
+bin/Release/manifest.json
+
+## OS
+.DS_Store
+Thumbs.db
+desktop.ini
