@@ -196,6 +196,11 @@ Il doit correspondre exactement à `AssemblyTitle = "TheSkyX Guider"`.
 | `ccdsoftAutoguider.Calibrate(0)` | ✅ Fonctionne |
 | `Subframe=false` (f minuscule) | ✅ Obligatoire — 'SubFrame' (F maj.) ignoré silencieusement |
 | `SubframeLeft/Top/Right/Bottom` | ✅ Coordonnées absolues (pas Width/Height) |
+| `ccdsoftAutoguiderImage` (≠ `ccdsoftCameraImage`) | ✅ Objet image DÉDIÉ autoguider — obligatoire pour l'inventaire des frames guide (via `ccdsoftCameraImage` → 0 source). Confirmé ciel 2026-05-31 |
+| `ccdsoftAutoguiderImage.ShowInventory()` | ✅ Confirmé ciel 2026-05-31 — ⚠ retourne 0 = code SUCCÈS, pas le nombre. Compte réel = `InventoryArray(0).length` |
+| `ccdsoftAutoguiderImage.InventoryArray(idx)` | ✅ idx : X=0, Y=1, Magnitude=2, Class=3, FWHM=4, Ellipticity=8. Magnitude mini = plus brillante |
+| `ccdsoftAutoguider.GuideStarX/Y` (écriture) | ✅ Confirmé ciel 2026-05-31 — écriture = sélection de l'étoile guide (équivalent au clic). Penser à `×BinX/BinY` (coords capteur) |
+| `ccdsoftAutoguiderImage.scanLine(i)` / `.FITSKeyword("BITPIX")` | ✅ Lecture pixels — utilisés pour le rejet de saturation |
 
 ### Limitation mock PluginOptionsAccessor
 `TryGetValue()` retourne toujours false avec NSubstitute → le getter revient toujours
@@ -250,6 +255,16 @@ https://github.com/ghilios/joko.nina.plugins/tree/develop/Joko.NINA.Plugins/Joko
 - Activer le subframe (`subframeSize > 0`) pour restreindre la zone de recherche.
 - Toujours remettre `Subframe=false` après `Calibrate(0)` pour le guidage normal.
 
+### `ShowInventory()` renvoie 0 source alors que des étoiles sont visibles
+- Cause : inventaire sur `ccdsoftCameraImage` (objet image de l'IMAGEUR), pas de l'autoguider.
+- Fix (confirmé ciel 2026-05-31) : utiliser **`ccdsoftAutoguiderImage`** (attach + ShowInventory + InventoryArray).
+- Rappel : `ShowInventory()` retourne un code (0=OK), PAS le nombre — utiliser `InventoryArray(0).length`.
+
+### Étoile de calibration trop près du bord → sort du champ pendant la calibration
+- `BuildAutoSelectGuideStar` applique une marge de bord = `max(edgeMarginPx, TrackBox/2+5)`.
+- Le wizard passe `edgeMarginPx = max(120, subframe/2+20)` pour couvrir la course de calibration.
+- Si aucune étoile assez centrée : retour "0,0,N" (sélection manuelle) plutôt qu'une étoile vouée à l'échec.
+
 ### Tests de clamp échouent
 - `PluginOptionsAccessor.TryGetValue()` retourne toujours false en NSubstitute.
 - Seuls les tests de valeurs par défaut sont fiables. Voir section 7.
@@ -281,9 +296,17 @@ https://github.com/ghilios/joko.nina.plugins/tree/develop/Joko.NINA.Plugins/Joko
 - ✅ **Phase 2** : Wizard calibration — confirmé fonctionnel sur ciel réel (2026-05-20) :
   slew auto, prise de vue auto, AutoContrast Bjorn, lecture GuideStarX/Y, subframe
   anti-hijacking, reset Subframe après calibration
+- ✅ **Phase 5a** : Sélection automatique de l'étoile guide — confirmé ciel 2026-05-31 :
+  `ccdsoftAutoguiderImage` + ShowInventory/InventoryArray, filtres (marge de bord, FWHM/ellipticité
+  relatives à la médiane, rejet saturation scanLine+BITPIX), unscale binning, écriture+relecture
+  GuideStarX/Y.
+- ⏳ **Phase 6** : Intégration "Start Guiding" de NINA — sélection auto du **fichier de calibration**
+  selon la position de l'objet (Est/Ouest), prise de vue + sélection étoile guide **NON saturée**
+  par critère **ADU** (intervalle + ADU optimum, configurables), puis lancement du guidage.
+  **Prompt détaillé : `PROMPT_Phase6_StartGuiding.md`.**
 - ⏳ **Phase 3** : Récupération RMS de guidage + statut connecté/déconnecté
 - ⏳ **Phase 4** : Correction status bar NINA "démarrage du guidage..." permanent
-- ⏳ **Phase 5** : Bouton "Lancer Guidage" dans l'UI, courbes de guidage, sélection étoile améliorée
+- ⏳ **Phase 7** : Bouton "Lancer Guidage" dans l'UI, courbes de guidage
 
 ---
 

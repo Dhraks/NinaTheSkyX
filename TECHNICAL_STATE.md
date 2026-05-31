@@ -95,21 +95,31 @@ NinaTheSkyX.Tests/
   - Subframe anti-hijacking autour de l'étoile sélectionnée (configurable 0–1000 px)
   - Subframe remis à false après `Calibrate(0)` → guidage normal non perturbé
   - Slider exposition images (1–30 s) distinct de l'exposition de guidage
-- ✅ tests verts — 77 attendus (70 + 7 pour le filtrage robuste de `BuildAutoSelectGuideStar`), à confirmer par `dotnet test`
+- ✅ tests verts — 78 attendus (70 + 8 pour le filtrage robuste + marge de bord de `BuildAutoSelectGuideStar`), à confirmer par `dotnet test`
 - ✅ `BuildAutoSelectGuideStar()` implémenté (2026-05-23) : prise de vue + ShowInventory + sélection auto étoile guide la plus brillante (FWHM 1.5–20 px), écriture GuideStarX/Y, restore AutoSaveOn
 - 🔧 **Fix 2026-05-30** : `BuildAutoSelectGuideStar` / `BuildDiagnoseAutoSelect` inventoriaient `ccdsoftCameraImage` (imageur) → `ShowInventory()` renvoyait **0 étoile**. Corrigé en `ccdsoftAutoguiderImage` (objet image dédié autoguider, cf. script de prod ScriptSkyX/Cline Obs). AutoContrast retiré du diagnostic (Error 11000). **✅ détection confirmée sur ciel 2026-05-31 : 99 sources (image 1391×1039) ; écriture GuideStarX/Y confirmée (APRES = coords étoile)**
-- 🛡️ **Robustesse 2026-05-30** : `BuildAutoSelectGuideStar` filtre marge de bord (TrackBoxX/Y), FWHM/ellipticité < facteur×médiane du champ, rejet saturation (scanLine + BITPIX), unscale binning (BinX/Y) avant écriture GuideStarX/Y. Sélection = la plus brillante NON saturée. +7 tests structure.
+- 🛡️ **Robustesse 2026-05-30** : `BuildAutoSelectGuideStar` filtre marge de bord calibration-safe (param `edgeMarginPx` ; wizard = max(120, subframe/2+20)), FWHM/ellipticité < facteur×médiane du champ, rejet saturation (scanLine + BITPIX), unscale binning (BinX/Y) avant écriture GuideStarX/Y. Sélection = la plus brillante NON saturée. +7 tests structure.
 - ⚠️ Dithering : implémenté, non testé en séquenceur NINA
 - ⚠️ Status bar NINA "guider : TheSkyX : démarrage du guidage..." reste affiché en permanence → bug à corriger
 
 ### Phases suivantes — À FAIRE
 
-Voir fichier `PROMPTS_TheSkyX_Next_Phases.md` pour le détail des 5 phases suivantes :
+> **PROCHAINE ACTION → Phase 6 : intégration "Start Guiding".**
+> Prompt détaillé : **`PROMPT_Phase6_StartGuiding.md`** (racine du repo).
+
+- ✅ **Sélection étoile guide automatique** — FAIT, confirmé ciel 2026-05-31 (cf. ci-dessus :
+  `ccdsoftAutoguiderImage`, filtres robustes, marge de bord calibration-safe, écriture+relecture GuideStarX/Y).
+- ⏭ **Phase 6 — Start Guiding** : sur l'instruction NINA "Start Guiding", avant de guider :
+  (1) sélectionner le bon **fichier de calibration** selon la position de l'objet (Est/Ouest) ;
+  (2) prendre une image guide + sélectionner une étoile **NON saturée** par critère **ADU**
+  (intervalle min/max + ADU optimum, à ajouter aux options) ; (3) lancer le guidage.
+  → `PROMPT_Phase6_StartGuiding.md`.
+
+Autres phases (voir `PROMPTS_TheSkyX_Next_Phases.md`) :
 1. **RMS guiding** — récupérer l'erreur RMS de guidage pour conditionner le lancement des poses
 2. **Status bar** — corriger le message "démarrage du guidage..." permanent
 3. **Bouton "Lancer Guidage"** dans l'UI du plugin
 4. **Courbes de guidage** — vérifier si l'affichage NINA est possible avec TheSkyX
-5. **Sélection étoile guide améliorée** — explorer l'API TheSkyX
 
 ---
 
@@ -237,7 +247,7 @@ Ouest (HA = +2h) : offsetH = −2h → RA = LST − 2h  ✅
 
 ## 8. Tests xUnit — `TheSkyXScriptBuilderTests.cs`
 
-77 tests attendus (70 + 7 pour le filtrage robuste de `BuildAutoSelectGuideStar`).
+78 tests attendus (70 + 8 pour le filtrage robuste + marge de bord de `BuildAutoSelectGuideStar`).
 Tests ajoutés en 2026-05-20 :
 
 ```csharp

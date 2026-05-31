@@ -163,13 +163,15 @@ namespace NinaTheSkyX.TheSkyX {
         /// <param name="maxFwhmMedianFactor">Rejette une source si sa FWHM dépasse ce facteur × la médiane du champ (défaut : 2.5).</param>
         /// <param name="maxEllipticityMedianFactor">Rejette une source si son ellipticité dépasse ce facteur × la médiane du champ (défaut : 2.5).</param>
         /// <param name="saturationFraction">Fraction de la pleine échelle (2^BITPIX-1) au-delà de laquelle un pixel est saturé (défaut : 0.9).</param>
+        /// <param name="edgeMarginPx">Marge de bord minimale en pixels : une source à moins de cette distance d'un bord est écartée — évite qu'elle sorte du champ pendant la course de calibration. 0 = dérive de la track box. Plancher effectif = max(edgeMarginPx, TrackBox/2+5).</param>
         public static string BuildAutoSelectGuideStar(
             double exposureSeconds,
             double minFwhmPx = 1.5,
             double maxFwhmPx = 20.0,
             double maxFwhmMedianFactor = 2.5,
             double maxEllipticityMedianFactor = 2.5,
-            double saturationFraction = 0.9) {
+            double saturationFraction = 0.9,
+            int edgeMarginPx = 0) {
 
             var exp      = exposureSeconds.ToString("R", CultureInfo.InvariantCulture);
             var minFwhm  = minFwhmPx.ToString("R", CultureInfo.InvariantCulture);
@@ -177,6 +179,7 @@ namespace NinaTheSkyX.TheSkyX {
             var fwhmFac  = maxFwhmMedianFactor.ToString("R", CultureInfo.InvariantCulture);
             var ellipFac = maxEllipticityMedianFactor.ToString("R", CultureInfo.InvariantCulture);
             var satFrac  = saturationFraction.ToString("R", CultureInfo.InvariantCulture);
+            var margin   = edgeMarginPx.ToString(CultureInfo.InvariantCulture);
 
             // ECMAScript 3 (moteur Qt Script de TheSkyX) : var, for traditionnel.
             // Constantes InventoryArray (doc officielle TheSkyX) :
@@ -258,10 +261,13 @@ namespace NinaTheSkyX.TheSkyX {
                 "ccdsoftAutoguider.AutoSaveOn=oldSave;" +
                 "if(n==0){Out=\"0,0,0\";}" +
                 "else{" +
-                // Dimensions image + marge de bord (demi track box +5, fallback 16 px) + seuil saturation.
+                // Dimensions image + marge de bord + seuil saturation.
                 "var W=ccdsoftAutoguiderImage.WidthInPixels,H=ccdsoftAutoguiderImage.HeightInPixels;" +
-                "var mX=ccdsoftAutoguider.TrackBoxX/2+5;if(!(mX>0))mX=16;" +
-                "var mY=ccdsoftAutoguider.TrackBoxY/2+5;if(!(mY>0))mY=16;" +
+                // Marge de bord = max(edgeMarginPx demandé, demi track box +5). edgeMarginPx doit couvrir
+                // la course de calibration (TheSkyX déplace l'étoile) sinon elle sort du champ et la calib échoue.
+                $"var mrg={margin};" +
+                "var mX=ccdsoftAutoguider.TrackBoxX/2+5;if(!(mX>0))mX=16;if(mrg>mX)mX=mrg;" +
+                "var mY=ccdsoftAutoguider.TrackBoxY/2+5;if(!(mY>0))mY=16;if(mrg>mY)mY=mrg;" +
                 "var bits=ccdsoftAutoguiderImage.FITSKeyword(\"BITPIX\");" +
                 $"var satMax=(Math.pow(2,bits)-1)*{satFrac};if(!(satMax>0))satMax=1e30;" +
                 // Seuils relatifs au champ : facteur × médiane (FWHM et ellipticité).

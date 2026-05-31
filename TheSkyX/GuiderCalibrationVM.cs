@@ -693,8 +693,13 @@ namespace NinaTheSkyX.TheSkyX {
                 // Prise de vue + analyse du champ + sélection automatique de l'étoile guide.
                 // BuildAutoSelectGuideStar active AutoSaveOn temporairement (requis par
                 // ShowInventory pour lire le fichier image sauvegardé sur disque).
+                // Marge de bord pour l'auto-sélection : doit couvrir la course de calibration ET
+                // garantir que le subframe anti-hijacking (centré sur l'étoile) tienne dans le champ.
+                // → au moins 120 px, et au moins la moitié du subframe + 20 px de buffer.
+                int edgeMargin = _options.TheSkyXGuiderSubframeSize / 2 + 20;
+                if (edgeMargin < 120) edgeMargin = 120;
                 var raw = await CreateClient().ExecuteAsync(
-                    TheSkyXScriptBuilder.BuildAutoSelectGuideStar(expSec), ct);
+                    TheSkyXScriptBuilder.BuildAutoSelectGuideStar(expSec, edgeMarginPx: edgeMargin), ct);
 
                 // Parse le résultat "X,Y,N" et construit le message de statut contextuel.
                 string autoSelectMsg;
