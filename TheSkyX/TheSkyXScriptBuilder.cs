@@ -126,7 +126,7 @@ namespace NinaTheSkyX.TheSkyX {
 
         /// <summary>
         /// Prend une image avec la caméra guide, analyse le champ via
-        /// <c>ccdsoftCameraImage.ShowInventory()</c> et sélectionne automatiquement
+        /// <c>ccdsoftAutoguiderImage.ShowInventory()</c> et sélectionne automatiquement
         /// l'étoile guide la plus brillante dont le FWHM est dans la plage
         /// [<paramref name="minFwhmPx"/>, <paramref name="maxFwhmPx"/>] pixels.
         ///
@@ -137,7 +137,7 @@ namespace NinaTheSkyX.TheSkyX {
         /// Gestion de l'autosave : <c>AutoSaveOn</c> est lu, activé temporairement avant
         /// <c>TakeImage()</c> puis restauré — <c>ShowInventory()</c> requiert que l'image
         /// ait été sauvegardée sur disque (le champ <c>Path</c> de
-        /// <c>ccdsoftCameraImage</c> doit être non vide).
+        /// <c>ccdsoftAutoguiderImage</c> doit être non vide).
         /// Le dossier cible est celui déjà configuré dans TheSkyX (AutoSave Setup).
         ///
         /// Format de retour (variable <c>Out</c>) :
@@ -149,24 +149,34 @@ namespace NinaTheSkyX.TheSkyX {
         ///     l'utilisateur doit sélectionner manuellement.</item>
         /// </list>
         ///
-        /// Utilise <c>ccdsoftCameraImage.InventoryArray(index)</c> avec les constantes
+        /// Utilise <c>ccdsoftAutoguiderImage.InventoryArray(index)</c> avec les constantes
         /// de la documentation officielle TheSkyX :
         ///   cdInventoryX = 0, cdInventoryY = 1, cdInventoryMagnitude = 2, cdInventoryFWHM = 4.
         ///
-        /// <b>⚠ Non vérifié sur ciel réel (2026-05-23)</b> : écriture de GuideStarX/Y,
-        /// ShowInventory(), InventoryArray() dans le contexte autoguider.
+        /// <b>⚠ Fix 2026-05-30</b> : utilise <c>ccdsoftAutoguiderImage</c> (objet image dédié
+        /// autoguider) au lieu de <c>ccdsoftCameraImage</c> (imageur), qui renvoyait 0 source via
+        /// ShowInventory(). Détection + écriture GuideStarX/Y confirmées sur ciel réel (2026-05-31).
         /// </summary>
         /// <param name="exposureSeconds">Durée d'exposition en secondes.</param>
         /// <param name="minFwhmPx">FWHM minimum acceptable en pixels (défaut : 1.5).</param>
         /// <param name="maxFwhmPx">FWHM maximum acceptable en pixels (défaut : 20.0).</param>
+        /// <param name="maxFwhmMedianFactor">Rejette une source si sa FWHM dépasse ce facteur × la médiane du champ (défaut : 2.5).</param>
+        /// <param name="maxEllipticityMedianFactor">Rejette une source si son ellipticité dépasse ce facteur × la médiane du champ (défaut : 2.5).</param>
+        /// <param name="saturationFraction">Fraction de la pleine échelle (2^BITPIX-1) au-delà de laquelle un pixel est saturé (défaut : 0.9).</param>
         public static string BuildAutoSelectGuideStar(
             double exposureSeconds,
             double minFwhmPx = 1.5,
-            double maxFwhmPx = 20.0) {
+            double maxFwhmPx = 20.0,
+            double maxFwhmMedianFactor = 2.5,
+            double maxEllipticityMedianFactor = 2.5,
+            double saturationFraction = 0.9) {
 
-            var exp     = exposureSeconds.ToString("R", CultureInfo.InvariantCulture);
-            var minFwhm = minFwhmPx.ToString("R", CultureInfo.InvariantCulture);
-            var maxFwhm = maxFwhmPx.ToString("R", CultureInfo.InvariantCulture);
+            var exp      = exposureSeconds.ToString("R", CultureInfo.InvariantCulture);
+            var minFwhm  = minFwhmPx.ToString("R", CultureInfo.InvariantCulture);
+            var maxFwhm  = maxFwhmPx.ToString("R", CultureInfo.InvariantCulture);
+            var fwhmFac  = maxFwhmMedianFactor.ToString("R", CultureInfo.InvariantCulture);
+            var ellipFac = maxEllipticityMedianFactor.ToString("R", CultureInfo.InvariantCulture);
+            var satFrac  = saturationFraction.ToString("R", CultureInfo.InvariantCulture);
 
             // ECMAScript 3 (moteur Qt Script de TheSkyX) : var, for traditionnel.
             // Constantes InventoryArray (doc officielle TheSkyX) :
@@ -177,7 +187,7 @@ namespace NinaTheSkyX.TheSkyX {
             // après lecture des tableaux pour ne pas modifier durablement les réglages TSX.
             //
             // AttachToActiveAutoguider() : méthode sémantiquement correcte pour l'automatisation.
-            // Attache ccdsoftCameraImage à la DERNIÈRE IMAGE ACQUISE PAR L'AUTOGUIDER, quelle que
+            // Attache ccdsoftAutoguiderImage à la DERNIÈRE IMAGE ACQUISE PAR L'AUTOGUIDER, quelle que
             // soit la fenêtre active dans TheSkyX — indépendant du focus clavier/souris.
             //
             // NE PAS utiliser AttachToActive() en contexte automatisé :
@@ -206,7 +216,18 @@ namespace NinaTheSkyX.TheSkyX {
             //   "0,0,N"  → N étoiles trouvées mais aucune valide (FWHM hors plage OU
             //               écriture GuideStarX/Y sans effet)
             return
-                "var cdX=0;var cdY=1;var cdM=2;var cdF=4;" +
+                "var cdX=0;var cdY=1;var cdM=2;var cdF=4;var cdE=8;" +
+                // median() : médiane d'un tableau (copie + tri) → seuils relatifs au champ.
+                "function median(a){var b=[];for(var i=0;i<a.length;i++)b.push(a[i]);" +
+                "b.sort(function(p,q){return p-q;});var h=Math.floor(b.length/2);" +
+                "return (b.length%2)?b[h]:(b[h-1]+b[h])/2.0;}" +
+                // notSat(ls) : vrai si aucun pixel d'une boîte ~2*FWHM autour de l'étoile ls ne
+                // dépasse satMax (rejet des étoiles saturées → centroïde fiable pour la calibration).
+                "function notSat(ls){var r=Math.max(2,Math.floor(Fa[ls]*2+0.5));" +
+                "var x0=Math.max(0,Math.floor(Xa[ls]-r)),x1=Math.min(W-1,Math.floor(Xa[ls]+r));" +
+                "var y0=Math.max(0,Math.floor(Ya[ls]-r)),y1=Math.min(H-1,Math.floor(Ya[ls]+r));" +
+                "for(var yy=y0;yy<=y1;yy++){var row=ccdsoftAutoguiderImage.scanLine(yy);" +
+                "for(var xx=x0;xx<=x1;xx++){if(row[xx]>satMax)return false;}}return true;}" +
                 "var oldSave=ccdsoftAutoguider.AutoSaveOn;" +
                 "ccdsoftAutoguider.AutoSaveOn=1;" +
                 // Asynchronous=0 : rend TakeImage() SYNCHRONE — bloque jusqu'à fin d'exposition.
@@ -223,29 +244,48 @@ namespace NinaTheSkyX.TheSkyX {
                 // supported") confirmé sur ciel réel (2026-05-24). ShowInventory() travaille sur
                 // les pixels bruts et n'a pas besoin d'AutoContrast (contrairement à BuildTakeGuiderImage
                 // qui l'utilise uniquement pour l'affichage à l'utilisateur).
-                "ccdsoftCameraImage.AttachToActiveAutoguider();" +
-                "ccdsoftCameraImage.ShowInventory();" +
-                "var Xa=ccdsoftCameraImage.InventoryArray(cdX);" +
-                "var Ya=ccdsoftCameraImage.InventoryArray(cdY);" +
-                "var Ma=ccdsoftCameraImage.InventoryArray(cdM);" +
-                "var Fa=ccdsoftCameraImage.InventoryArray(cdF);" +
+                // ccdsoftAutoguiderImage = objet image DÉDIÉ à l'autoguider (≠ ccdsoftCameraImage = imageur).
+                // ccdsoftCameraImage.AttachToActiveAutoguider() renvoyait 0 source via ShowInventory()
+                // (le script de prod ScriptSkyX / Cline Observatory utilise ccdsoftAutoguiderImage). Fix 2026-05-30.
+                "ccdsoftAutoguiderImage.AttachToActiveAutoguider();" +
+                "ccdsoftAutoguiderImage.ShowInventory();" +
+                "var Xa=ccdsoftAutoguiderImage.InventoryArray(cdX);" +
+                "var Ya=ccdsoftAutoguiderImage.InventoryArray(cdY);" +
+                "var Ma=ccdsoftAutoguiderImage.InventoryArray(cdM);" +
+                "var Fa=ccdsoftAutoguiderImage.InventoryArray(cdF);" +
+                "var Ea=ccdsoftAutoguiderImage.InventoryArray(cdE);" +
                 "var n=Xa.length;" +
                 "ccdsoftAutoguider.AutoSaveOn=oldSave;" +
                 "if(n==0){Out=\"0,0,0\";}" +
                 "else{" +
-                "var bi=-1;var bm=999999;" +
-                "for(var i=0;i<n;i++){" +
-                $"if(Fa[i]>={minFwhm}&&Fa[i]<={maxFwhm}&&Ma[i]<bm){{bm=Ma[i];bi=i;}}" +
-                "}" +
+                // Dimensions image + marge de bord (demi track box +5, fallback 16 px) + seuil saturation.
+                "var W=ccdsoftAutoguiderImage.WidthInPixels,H=ccdsoftAutoguiderImage.HeightInPixels;" +
+                "var mX=ccdsoftAutoguider.TrackBoxX/2+5;if(!(mX>0))mX=16;" +
+                "var mY=ccdsoftAutoguider.TrackBoxY/2+5;if(!(mY>0))mY=16;" +
+                "var bits=ccdsoftAutoguiderImage.FITSKeyword(\"BITPIX\");" +
+                $"var satMax=(Math.pow(2,bits)-1)*{satFrac};if(!(satMax>0))satMax=1e30;" +
+                // Seuils relatifs au champ : facteur × médiane (FWHM et ellipticité).
+                $"var maxF=median(Fa)*{fwhmFac},maxEl=median(Ea)*{ellipFac};" +
+                // Candidats : pas trop près du bord, FWHM dans plage absolue ET < facteur*médiane,
+                // ellipticité < facteur*médiane (rejette blobs, doubles, traînées, hot pixels).
+                "var cand=[];for(var i=0;i<n;i++){" +
+                "if(Xa[i]<mX||Xa[i]>W-mX||Ya[i]<mY||Ya[i]>H-mY)continue;" +
+                $"if(Fa[i]<{minFwhm}||Fa[i]>{maxFwhm}||Fa[i]>maxF)continue;" +
+                "if(Ea[i]>maxEl)continue;cand.push(i);}" +
+                // Plus brillant (magnitude mini) d'abord, puis 1er candidat NON saturé.
+                "cand.sort(function(a,b){return Ma[a]-Ma[b];});" +
+                "var bi=-1;for(var c=0;c<cand.length;c++){if(notSat(cand[c])){bi=cand[c];break;}}" +
                 "if(bi<0){Out=\"0,0,\"+n;}" +
                 "else{" +
-                "ccdsoftAutoguider.GuideStarX=Xa[bi];" +
-                "ccdsoftAutoguider.GuideStarY=Ya[bi];" +
-                // Vérification par relecture : confirme que l'écriture GuideStarX/Y a pris effet.
-                // Si non (propriété read-only en scripting), retourne "0,0,N" pour signaler l'échec.
+                // Unscale binning : GuideStarX/Y en coords capteur (TheSkyX rescale ensuite).
+                "var bx=ccdsoftAutoguider.BinX;if(!(bx>0))bx=1;" +
+                "var by=ccdsoftAutoguider.BinY;if(!(by>0))by=1;" +
+                "var wX=Xa[bi]*bx,wY=Ya[bi]*by;" +
+                "ccdsoftAutoguider.GuideStarX=wX;ccdsoftAutoguider.GuideStarY=wY;" +
+                // Relecture : confirme que l'écriture a pris effet (sinon "0,0,N").
                 "var rbX=ccdsoftAutoguider.GuideStarX;" +
                 "var rbY=ccdsoftAutoguider.GuideStarY;" +
-                "if(Math.abs(rbX-Xa[bi])<1.0&&Math.abs(rbY-Ya[bi])<1.0){" +
+                "if(Math.abs(rbX-wX)<1.0&&Math.abs(rbY-wY)<1.0){" +
                 "Out=Xa[bi]+\",\"+Ya[bi]+\",\"+n;}" +
                 "else{Out=\"0,0,\"+n;}" +
                 "}" +
@@ -275,14 +315,14 @@ namespace NinaTheSkyX.TheSkyX {
                 $"ccdsoftAutoguider.ExposureTime={exp};" +
                 "ccdsoftAutoguider.TakeImage();" +
                 // Diagnostic : AttachToActiveAutoguider vs chemin image
-                "ccdsoftCameraImage.AttachToActiveAutoguider();" +
-                "var imgPath=ccdsoftCameraImage.Path;" +
-                "ccdsoftCameraImage.AutoContrast(1,1,3);" +
-                "ccdsoftCameraImage.ShowInventory();" +
-                "var Xa=ccdsoftCameraImage.InventoryArray(0);" +
-                "var Ya=ccdsoftCameraImage.InventoryArray(1);" +
-                "var Ma=ccdsoftCameraImage.InventoryArray(2);" +
-                "var Fa=ccdsoftCameraImage.InventoryArray(4);" +
+                "ccdsoftAutoguiderImage.AttachToActiveAutoguider();" +
+                "var imgPath=ccdsoftAutoguiderImage.Path;" +
+                // AutoContrast retiré : Error 11000 ("command not supported") + inutile pour ShowInventory().
+                "ccdsoftAutoguiderImage.ShowInventory();" +
+                "var Xa=ccdsoftAutoguiderImage.InventoryArray(0);" +
+                "var Ya=ccdsoftAutoguiderImage.InventoryArray(1);" +
+                "var Ma=ccdsoftAutoguiderImage.InventoryArray(2);" +
+                "var Fa=ccdsoftAutoguiderImage.InventoryArray(4);" +
                 "var n=Xa.length;" +
                 "ccdsoftAutoguider.AutoSaveOn=oldSave;" +
                 // Lecture GuideStarX/Y avant écriture

@@ -95,8 +95,10 @@ NinaTheSkyX.Tests/
   - Subframe anti-hijacking autour de l'étoile sélectionnée (configurable 0–1000 px)
   - Subframe remis à false après `Calibrate(0)` → guidage normal non perturbé
   - Slider exposition images (1–30 s) distinct de l'exposition de guidage
-- ✅ 65/65 tests verts (56 existants + 9 nouveaux pour `BuildAutoSelectGuideStar`)
-- ✅ `BuildAutoSelectGuideStar()` implémenté (2026-05-23) : prise de vue + ShowInventory + sélection auto étoile guide la plus brillante (FWHM 1.5–20 px), écriture GuideStarX/Y, restore AutoSaveOn — **⚠ non vérifié sur ciel réel**
+- ✅ tests verts — 77 attendus (70 + 7 pour le filtrage robuste de `BuildAutoSelectGuideStar`), à confirmer par `dotnet test`
+- ✅ `BuildAutoSelectGuideStar()` implémenté (2026-05-23) : prise de vue + ShowInventory + sélection auto étoile guide la plus brillante (FWHM 1.5–20 px), écriture GuideStarX/Y, restore AutoSaveOn
+- 🔧 **Fix 2026-05-30** : `BuildAutoSelectGuideStar` / `BuildDiagnoseAutoSelect` inventoriaient `ccdsoftCameraImage` (imageur) → `ShowInventory()` renvoyait **0 étoile**. Corrigé en `ccdsoftAutoguiderImage` (objet image dédié autoguider, cf. script de prod ScriptSkyX/Cline Obs). AutoContrast retiré du diagnostic (Error 11000). **✅ détection confirmée sur ciel 2026-05-31 : 99 sources (image 1391×1039) ; écriture GuideStarX/Y confirmée (APRES = coords étoile)**
+- 🛡️ **Robustesse 2026-05-30** : `BuildAutoSelectGuideStar` filtre marge de bord (TrackBoxX/Y), FWHM/ellipticité < facteur×médiane du champ, rejet saturation (scanLine + BITPIX), unscale binning (BinX/Y) avant écriture GuideStarX/Y. Sélection = la plus brillante NON saturée. +7 tests structure.
 - ⚠️ Dithering : implémenté, non testé en séquenceur NINA
 - ⚠️ Status bar NINA "guider : TheSkyX : démarrage du guidage..." reste affiché en permanence → bug à corriger
 
@@ -146,8 +148,9 @@ Nouveau flux avec `BuildAutoSelectGuideStar()` (2026-05-23) :
 2. Si une étoile est trouvée : `GuideStarX/Y` sont écrits dans TheSkyX → statut "⭐ Étoile auto-sélectionnée".
 3. Si aucune étoile valide : statut "⚠ Sélection manuelle requise" → l'utilisateur clique dans TheSkyX.
 
-**⚠ Non vérifié sur ciel réel (2026-05-23)** : l'écriture de GuideStarX/Y par script
-et `ShowInventory()`/`InventoryArray()` dans le contexte autoguider doivent être confirmés.
+**🔧 Fix 2026-05-30** : l'inventaire utilisait `ccdsoftCameraImage` (objet image de
+l'imageur) → `ShowInventory()` renvoyait 0 étoile. Corrigé en `ccdsoftAutoguiderImage`
+(objet image dédié à l'autoguider). L'écriture de GuideStarX/Y reste à confirmer sur ciel réel.
 
 L'utilisateur **peut toujours cliquer manuellement une autre étoile** dans TheSkyX avant de valider "Image OK".
 
@@ -167,7 +170,7 @@ L'utilisateur **peut toujours cliquer manuellement une autre étoile** dans TheS
 | `BuildStopGuiding()` | `ccdsoftAutoguider.Abort();Out=0;` | ✅ |
 | `BuildDither(arcsec)` | `sky6RASCOMTele.Jog(v,'East');Jog(v,'North');Out=0;` | ✅ |
 | `BuildJogRA(arcsec)` | `sky6RASCOMTele.Jog(v,'East'\|'West');Out=0;` | ✅ |
-| `BuildAutoSelectGuideStar(exp, minFwhm, maxFwhm)` | `oldSave=AutoSaveOn;AutoSaveOn=1;TakeImage();ShowInventory();InventoryArray(…);AutoSaveOn=oldSave;[GuideStarX/Y=…;]Out="X,Y,N"\|"0,0,N"\|"0,0,0";` | ⚠ Implémenté 2026-05-23, **non testé sur ciel réel** |
+| `BuildAutoSelectGuideStar(exp, minFwhm, maxFwhm, fwhmFac, ellipFac, satFrac)` | `ccdsoftAutoguiderImage` : ShowInventory + filtres (bord/FWHM/ellipticité-médiane, saturation scanLine+BITPIX) + unscale binning + écriture/relecture GuideStarX/Y. Retour `"X,Y,N"\|"0,0,N"\|"0,0,0"` | 🛡️ Robuste 2026-05-30, **à confirmer sur ciel réel** |
 | `BuildAutoFindGuideStar()` | — | ❌ [Obsolete] — N'existe pas. Voir `BuildAutoSelectGuideStar()` |
 | `BuildCenterBrightestObject()` | `ccdsoftAutoguider.CenterBrightestObject();Out=0;` | ❌ [Obsolete] — Test réel 2026-05-22 : centrage physique de monture, pas sélection d'étoile |
 
@@ -199,9 +202,10 @@ Ouest (HA = +2h) : offsetH = −2h → RA = LST − 2h  ✅
 |---|---|---|
 | `ccdsoftAutoguider.AutoFindGuideStar()` | ❌ N'existe pas | TypeError (test réel 2026-05-10). Recherche doc exhaustive 2026-05-22 : aucun équivalent (AutoFind, FindStar, FindGuideStar absent de classccdsoft_camera-members.html) |
 | `ccdsoftAutoguider.CenterBrightestObject()` | ❌ Inutile pour sélection | Test réel 2026-05-22 : GuideStarX/Y reste 0,0 après l'appel. Fait un centrage physique de monture (impulsions guidage), pas une sélection d'étoile guide. |
-| `ccdsoftAutoguider.GuideStarX` (écriture) | ⚠ Non testé | Propriété read/write selon la doc. Intégrée dans `BuildAutoSelectGuideStar()` (2026-05-23) — à confirmer sur ciel réel |
-| `ccdsoftCameraImage.ShowInventory()` | ⚠ Non testé | Requiert Path non vide (AutoSaveOn=1). Intégrée dans `BuildAutoSelectGuideStar()` (2026-05-23) |
-| `ccdsoftCameraImage.InventoryArray(idx)` | ⚠ Non testé | idx : cdX=0, cdY=1, cdMagnitude=2, cdFWHM=4. Intégré dans `BuildAutoSelectGuideStar()` |
+| `ccdsoftAutoguider.GuideStarX` (écriture) | ✅ Confirmé ciel 2026-05-31 | Écriture par script effective : APRES=(522.83,520.802)=coords étoile. `GuideStarX/Y` = position de l'étoile guide sélectionnée (équivalent au clic utilisateur). |
+| `ccdsoftAutoguiderImage` (objet image autoguider) | ✅ Confirmé ciel 2026-05-31 | **Objet distinct de `ccdsoftCameraImage` (imageur).** Pour les frames autoguider il FAUT utiliser `ccdsoftAutoguiderImage`. Test ciel : 99 sources sur image 1391×1039 (via `ccdsoftCameraImage` → 0). Source : ScriptSkyX / Cline Obs |
+| `ccdsoftAutoguiderImage.ShowInventory()` | ✅ Confirmé ciel 2026-05-31 | ⚠ **Retourne 0 = code de SUCCÈS, PAS le nombre de sources.** Le nombre réel = `InventoryArray(0).length` (= 99 au test). Notre code utilise bien `.length`. |
+| `ccdsoftAutoguiderImage.InventoryArray(idx)` | ✅ Confirmé ciel 2026-05-31 | idx : cdX=0, cdY=1, cdMagnitude=2, cdFWHM=4, cdEllipticity=8. Test ciel : 99 sources. |
 | `ccdsoftAutoguider.AutoSaveOn` (lecture/écriture) | ⚠ Non testé | Propriété read/write. Sauvegarde/restaure l'état dans `BuildAutoSelectGuideStar()` |
 | `ccdsoftAutoguider.GuideErrorX` | ⚠ Non testé | Présent dans la doc ("x guide error"). Confirmer nom exact et unités lors du test ciel (pixels ?) |
 | `ccdsoftAutoguider.GuideErrorY` | ⚠ Non testé | Présent dans la doc ("y guide error"). Idem |
@@ -233,7 +237,7 @@ Ouest (HA = +2h) : offsetH = −2h → RA = LST − 2h  ✅
 
 ## 8. Tests xUnit — `TheSkyXScriptBuilderTests.cs`
 
-65 tests au total (56 existants + 9 pour `BuildAutoSelectGuideStar`).
+77 tests attendus (70 + 7 pour le filtrage robuste de `BuildAutoSelectGuideStar`).
 Tests ajoutés en 2026-05-20 :
 
 ```csharp
