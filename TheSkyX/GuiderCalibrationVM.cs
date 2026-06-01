@@ -167,7 +167,7 @@ namespace NinaTheSkyX.TheSkyX {
                   || Stage == CalibrationWizardStage.AwaitingImageValidationWest);
 
             CalibrationOkCommand = new RelayCommand(
-                _ => OnCalibrationOk(),
+                async _ => await OnCalibrationOkAsync(),
                 _ => Stage == CalibrationWizardStage.AwaitingCalibrationValidationEast
                   || Stage == CalibrationWizardStage.AwaitingCalibrationValidationWest);
 
@@ -474,6 +474,41 @@ namespace NinaTheSkyX.TheSkyX {
             }
 
             await TakeGuideImageAsync(takingStage, awaitingStage, ct);
+        }
+
+        /// <summary>
+        /// Calibration validée : capture (expérimental) les paramètres de calibration TheSkyX du
+        /// côté courant pour les réécrire au Start Guiding, puis enregistre la date et avance.
+        /// </summary>
+        private async Task OnCalibrationOkAsync() {
+            bool isEast = _stage == CalibrationWizardStage.AwaitingCalibrationValidationEast;
+            await TryCaptureCalibrationDataAsync(isEast);
+            OnCalibrationOk();
+        }
+
+        /// <summary>
+        /// ⚠ EXPÉRIMENTAL (non vérifié sur ciel) — lit les paramètres de calibration courants de
+        /// TheSkyX (<see cref="TheSkyXScriptBuilder.BuildReadCalibration"/>) et les mémorise dans
+        /// <c>PluginOptions.East/WestCalibrationData</c> pour le côté <paramref name="isEast"/>.
+        /// Best-effort : un échec n'interrompt pas le wizard (la fonctionnalité est expérimentale).
+        /// </summary>
+        private async Task TryCaptureCalibrationDataAsync(bool isEast) {
+            var ct = _cts?.Token ?? CancellationToken.None;
+            var sideStr = isEast ? "Est" : "Ouest";
+            try {
+                var blob = await CreateClient().ExecuteAsync(
+                    TheSkyXScriptBuilder.BuildReadCalibration(), ct);
+
+                if (!string.IsNullOrWhiteSpace(blob)) {
+                    if (isEast) _options.EastCalibrationData = blob;
+                    else        _options.WestCalibrationData = blob;
+                    Logger.Info($"[TheSkyX] Paramètres de calibration {sideStr} mémorisés (expérimental) : {blob}");
+                } else {
+                    Logger.Warning($"[TheSkyX] Lecture calibration {sideStr} vide — rien mémorisé.");
+                }
+            } catch (Exception ex) {
+                Logger.Warning($"[TheSkyX] Capture calibration {sideStr} échouée (non bloquant) : {ex.Message}");
+            }
         }
 
         /// <summary>

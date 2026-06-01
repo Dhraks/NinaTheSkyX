@@ -200,7 +200,16 @@ Il doit correspondre exactement à `AssemblyTitle = "TheSkyX Guider"`.
 | `ccdsoftAutoguiderImage.ShowInventory()` | ✅ Confirmé ciel 2026-05-31 — ⚠ retourne 0 = code SUCCÈS, pas le nombre. Compte réel = `InventoryArray(0).length` |
 | `ccdsoftAutoguiderImage.InventoryArray(idx)` | ✅ idx : X=0, Y=1, Magnitude=2, Class=3, FWHM=4, Ellipticity=8. Magnitude mini = plus brillante |
 | `ccdsoftAutoguider.GuideStarX/Y` (écriture) | ✅ Confirmé ciel 2026-05-31 — écriture = sélection de l'étoile guide (équivalent au clic). Penser à `×BinX/BinY` (coords capteur) |
-| `ccdsoftAutoguiderImage.scanLine(i)` / `.FITSKeyword("BITPIX")` | ✅ Lecture pixels — utilisés pour le rejet de saturation |
+| `ccdsoftAutoguiderImage.scanLine(i)` / `.FITSKeyword("BITPIX")` | ✅ Lecture pixels — rejet de saturation ET **pic ADU** (sélection guidage Phase 6) |
+| `ccdsoftAutoguider.CalibrationVector{X,Y}{Positive,Negative}{X,Y}Component` (8) | ✅ **Lecture + écriture confirmées ciel 2026-06-01** (`BuildDiagnoseCalibration`) : `type=number`, valeurs réelles (ex. ±17…81), `writable=true`. Composantes du vecteur de calibration |
+| `AutoguiderCalibrationTime{X,Y}Axis` (1/100 s), `AutoguiderBacklash{X,Y}Axis`, `SavedCalibrationTime{X,Y}`, `DeclinationAtCalibration` | ✅ **Lecture + écriture confirmées ciel 2026-06-01** : `writable=true`. Ex. `CalTime=20000`, `Backlash=0`, `DecAtCal≈0` (calib à Dec 0) |
+| `ccdsoftAutoguider.Calibration` (lecture) | ⚠ retourne **undefined** en lecture (2026-06-01). L'écriture (`=0`/`=1`) est probablement effective mais non relisible → la vérif du restore se base sur les 15 propriétés numériques, PAS sur `Calibration` |
+| Restauration calibration par script (write-back des 15 propriétés + `Calibration=1`) | 🟡 **Prérequis read+write confirmés (2026-06-01)** ; reste à valider en bout de chaîne que `Autoguide()` consomme la calib restaurée sans recalibrer (test Start Guiding réel) |
+
+> **NINA SDK (décompilation `NINA.Equipment` 3.2.0.9001, 2026-05-31)** : `TelescopeInfo` expose
+> `Connected`, `SiderealTime`, `RightAscension`, `Coordinates`, `SideOfPier`, `HoursToMeridian`,
+> `TimeToMeridianFlip`. Côté méridien calculé : **HA = LST − RA** (HA < 0 = Est, ≥ 0 = Ouest).
+> `IGuider.AutoSelectGuideStar()` est sans paramètre (confirmé par l'implémentation qui compile).
 
 ### Limitation mock PluginOptionsAccessor
 `TryGetValue()` retourne toujours false avec NSubstitute → le getter revient toujours
@@ -300,9 +309,14 @@ https://github.com/ghilios/joko.nina.plugins/tree/develop/Joko.NINA.Plugins/Joko
   `ccdsoftAutoguiderImage` + ShowInventory/InventoryArray, filtres (marge de bord, FWHM/ellipticité
   relatives à la médiane, rejet saturation scanLine+BITPIX), unscale binning, écriture+relecture
   GuideStarX/Y.
-- ⏳ **Phase 6** : Intégration "Start Guiding" de NINA — sélection auto du **fichier de calibration**
-  selon la position de l'objet (Est/Ouest), prise de vue + sélection étoile guide **NON saturée**
-  par critère **ADU** (intervalle + ADU optimum, configurables), puis lancement du guidage.
+- 🟡 **Phase 6** : Intégration "Start Guiding" de NINA — **code livré 2026-05-31, À VALIDER SUR CIEL**.
+  `StartGuiding()` orchestre : (1) détection côté méridien (HA = LST−RA via `Plugin.TelescopeMediator`),
+  (2) restauration calibration mémorisée pour ce côté (**EXPÉRIMENTAL** — `BuildRestoreCalibration`,
+  écriture des propriétés de calibration non vérifiée), (3) sélection étoile **NON saturée** par
+  critère **ADU** (`BuildAutoSelectGuideStar` mode ADU + options `GuideStarMin/Max/OptimumADU`),
+  (4) `Autoguide()`. `AutoSelectGuideStar()` implémenté (n'est plus un no-op). Capture calibration
+  par côté à la fin du wizard. **Reste à faire** : exécuter `BuildDiagnoseCalibration()` sur ciel
+  pour confirmer l'inscriptibilité des propriétés de calibration ; régler les ADU selon la caméra guide.
   **Prompt détaillé : `PROMPT_Phase6_StartGuiding.md`.**
 - ⏳ **Phase 3** : Récupération RMS de guidage + statut connecté/déconnecté
 - ⏳ **Phase 4** : Correction status bar NINA "démarrage du guidage..." permanent

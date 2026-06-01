@@ -65,6 +65,40 @@ namespace NinaTheSkyX.Options {
                        Math.Round(Math.Max(1.0, Math.Min(30.0, value))));
         }
 
+        // ---- Sélection d'étoile guide par critère ADU (Phase 6) ----------
+
+        /// <summary>
+        /// Pic ADU minimum acceptable pour l'étoile guide (échelle brute capteur, 0..2^BITPIX-1).
+        /// En dessous : étoile trop faible (SNR insuffisant). Default : 8000. Range : 0–65535.
+        /// ⚠ Dépend de la caméra guide (profondeur de bits / gain) — voir BuildDiagnoseAutoSelect.
+        /// </summary>
+        public int GuideStarMinADU {
+            get => _accessor.GetValueInt32(nameof(GuideStarMinADU), 8000);
+            set => _accessor.SetValueInt32(nameof(GuideStarMinADU),
+                       Math.Max(0, Math.Min(65535, value)));
+        }
+
+        /// <summary>
+        /// Pic ADU maximum acceptable (doit rester sous la saturation). Au-dessus : étoile rejetée.
+        /// Default : 45000. Range : 0–65535. ⚠ Dépend de la caméra guide.
+        /// </summary>
+        public int GuideStarMaxADU {
+            get => _accessor.GetValueInt32(nameof(GuideStarMaxADU), 45000);
+            set => _accessor.SetValueInt32(nameof(GuideStarMaxADU),
+                       Math.Max(0, Math.Min(65535, value)));
+        }
+
+        /// <summary>
+        /// Pic ADU cible : l'étoile retenue est celle dont le pic est le plus proche de cette valeur,
+        /// dans l'intervalle [<see cref="GuideStarMinADU"/>, <see cref="GuideStarMaxADU"/>].
+        /// Meilleur compromis SNR / marge de saturation. Default : 25000. Range : 0–65535.
+        /// </summary>
+        public int GuideStarOptimumADU {
+            get => _accessor.GetValueInt32(nameof(GuideStarOptimumADU), 25000);
+            set => _accessor.SetValueInt32(nameof(GuideStarOptimumADU),
+                       Math.Max(0, Math.Min(65535, value)));
+        }
+
         // ---- Calibration — dates persistées ------------------------------
 
         /// <summary>Date/heure de la dernière calibration réussie côté EST. Null si jamais calibré.</summary>
@@ -87,6 +121,24 @@ namespace NinaTheSkyX.Options {
             }
             set => _accessor.SetValueString(nameof(LastWestCalibrationAt),
                        value.HasValue ? value.Value.ToString("o") : string.Empty);
+        }
+
+        // ---- Calibration — paramètres mémorisés par côté (Phase 6, EXPÉRIMENTAL) ----
+        //
+        // ⚠ Blob "clé=valeur;…" produit par TheSkyXScriptBuilder.BuildReadCalibration() après une
+        // calibration réussie. Réécrit au Start Guiding selon le côté du méridien de l'objet.
+        // Vide tant que la stratégie save/restore n'a pas été validée sur ciel.
+
+        /// <summary>Paramètres de calibration TheSkyX mémorisés côté EST (blob "clé=valeur;…"). Vide si non capturé.</summary>
+        public string EastCalibrationData {
+            get => _accessor.GetValueString(nameof(EastCalibrationData), string.Empty);
+            set => _accessor.SetValueString(nameof(EastCalibrationData), value ?? string.Empty);
+        }
+
+        /// <summary>Paramètres de calibration TheSkyX mémorisés côté OUEST (blob "clé=valeur;…"). Vide si non capturé.</summary>
+        public string WestCalibrationData {
+            get => _accessor.GetValueString(nameof(WestCalibrationData), string.Empty);
+            set => _accessor.SetValueString(nameof(WestCalibrationData), value ?? string.Empty);
         }
 
         // ---- Divers ------------------------------------------------------

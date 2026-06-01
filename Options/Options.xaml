@@ -51,6 +51,37 @@
                 <CheckBox Content="Logs détaillés (debug)"
                           IsChecked="{Binding DebugLogging}" Margin="0,0,0,12"/>
 
+                <!-- Sélection auto de l'étoile guide par ADU (Phase 6) -->
+                <TextBlock Text="Sélection auto de l'étoile guide (ADU)" FontWeight="Bold" Margin="0,0,0,4"/>
+                <TextBlock TextWrapping="Wrap" Margin="0,0,0,6" FontSize="11" Foreground="Gray"
+                           Text="Au démarrage du guidage, le plugin prend une image guide et choisit une étoile NON saturée dont le pic ADU est le plus proche de l'optimum, dans l'intervalle min–max. Échelle brute du capteur (dépend de la caméra guide / profondeur de bits)."/>
+                <Grid Margin="0,0,0,12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="220"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="ADU min" VerticalAlignment="Center"
+                               ToolTip="Pic ADU minimum : en dessous, étoile trop faible (SNR insuffisant)."/>
+                    <TextBox   Grid.Row="0" Grid.Column="1"
+                               Text="{Binding GuideStarMinADU, UpdateSourceTrigger=PropertyChanged}"/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="ADU optimum" VerticalAlignment="Center"
+                               ToolTip="Pic ADU cible : l'étoile dont le pic est le plus proche est retenue."/>
+                    <TextBox   Grid.Row="1" Grid.Column="1"
+                               Text="{Binding GuideStarOptimumADU, UpdateSourceTrigger=PropertyChanged}"/>
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="ADU max" VerticalAlignment="Center"
+                               ToolTip="Pic ADU maximum (sous la saturation) : au-dessus, étoile rejetée."/>
+                    <TextBox   Grid.Row="2" Grid.Column="1"
+                               Text="{Binding GuideStarMaxADU, UpdateSourceTrigger=PropertyChanged}"/>
+                </Grid>
+
                 <!-- Wizard calibration guidage -->
                 <GroupBox Header="Calibration du guidage TheSkyX" Margin="0,0,0,12" Padding="8"
                           DataContext="{Binding GuiderCalibration}">

@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 
 namespace NinaTheSkyX.TheSkyX {
 
@@ -164,6 +166,23 @@ namespace NinaTheSkyX.TheSkyX {
         /// <param name="maxEllipticityMedianFactor">Rejette une source si son ellipticité dépasse ce facteur × la médiane du champ (défaut : 2.5).</param>
         /// <param name="saturationFraction">Fraction de la pleine échelle (2^BITPIX-1) au-delà de laquelle un pixel est saturé (défaut : 0.9).</param>
         /// <param name="edgeMarginPx">Marge de bord minimale en pixels : une source à moins de cette distance d'un bord est écartée — évite qu'elle sorte du champ pendant la course de calibration. 0 = dérive de la track box. Plancher effectif = max(edgeMarginPx, TrackBox/2+5).</param>
+        /// <param name="minADU">Pic ADU minimum acceptable (échelle brute capteur, 0..2^BITPIX-1). 0 (avec maxADU=0) = critère ADU désactivé.</param>
+        /// <param name="maxADU">Pic ADU maximum acceptable (sous la saturation). <b>0 = mode hérité</b> (plus brillante non saturée). &gt;0 = active la sélection par critère ADU.</param>
+        /// <param name="optimumADU">Pic ADU cible : parmi les candidats dont le pic ∈ [minADU, maxADU], on retient celui dont |pic − optimumADU| est minimal (meilleur compromis SNR/saturation pour le guidage).</param>
+        /// <remarks>
+        /// <b>Deux modes de sélection</b> :
+        /// <list type="bullet">
+        ///   <item><c>maxADU == 0</c> (défaut) : comportement hérité — l'étoile la plus brillante
+        ///     (magnitude minimale) parmi les candidats non saturés. Utilisé par le wizard de calibration.</item>
+        ///   <item><c>maxADU &gt; 0</c> : sélection par <b>pic ADU</b> — on calcule le pixel maximum
+        ///     (<c>peakADU</c>) dans une boîte ~2×FWHM autour de chaque candidat, on ne garde que ceux
+        ///     dont le pic ∈ [<paramref name="minADU"/>, <paramref name="maxADU"/>] (et &lt; seuil de
+        ///     saturation BITPIX), puis on choisit le pic le plus proche de <paramref name="optimumADU"/>.
+        ///     Utilisé par le flux de guidage (étoile bien exposée mais NON saturée).</item>
+        /// </list>
+        /// Le pic ADU est sur l'échelle brute du capteur (0..2^BITPIX−1) : régler les bornes selon
+        /// la profondeur de bits réelle de la caméra guide (⚠ caméras 12 bits encapsulées en 16 bits).
+        /// </remarks>
         public static string BuildAutoSelectGuideStar(
             double exposureSeconds,
             double minFwhmPx = 1.5,
@@ -171,7 +190,10 @@ namespace NinaTheSkyX.TheSkyX {
             double maxFwhmMedianFactor = 2.5,
             double maxEllipticityMedianFactor = 2.5,
             double saturationFraction = 0.9,
-            int edgeMarginPx = 0) {
+            int edgeMarginPx = 0,
+            int minADU = 0,
+            int maxADU = 0,
+            int optimumADU = 0) {
 
             var exp      = exposureSeconds.ToString("R", CultureInfo.InvariantCulture);
             var minFwhm  = minFwhmPx.ToString("R", CultureInfo.InvariantCulture);
@@ -180,6 +202,9 @@ namespace NinaTheSkyX.TheSkyX {
             var ellipFac = maxEllipticityMedianFactor.ToString("R", CultureInfo.InvariantCulture);
             var satFrac  = saturationFraction.ToString("R", CultureInfo.InvariantCulture);
             var margin   = edgeMarginPx.ToString(CultureInfo.InvariantCulture);
+            var minAdu   = minADU.ToString(CultureInfo.InvariantCulture);
+            var maxAdu   = maxADU.ToString(CultureInfo.InvariantCulture);
+            var optAdu   = optimumADU.ToString(CultureInfo.InvariantCulture);
 
             // ECMAScript 3 (moteur Qt Script de TheSkyX) : var, for traditionnel.
             // Constantes InventoryArray (doc officielle TheSkyX) :
@@ -210,8 +235,9 @@ namespace NinaTheSkyX.TheSkyX {
             // Si la propriété n'est pas réellement writable en contexte scripting, rbX ≠ Xa[bi]
             // et on retourne "0,0,N" honnêtement (évite d'afficher faussement "⭐ sélectionnée").
             //
-            // Sélection : parmi les étoiles dont FWHM ∈ [minFwhmPx, maxFwhmPx],
-            // on garde celle de magnitude la plus faible (= la plus brillante).
+            // Sélection : candidats = FWHM ∈ [minFwhmPx, maxFwhmPx] + filtres bord/médiane.
+            // maxADU==0 → la plus brillante non saturée (calibration) ;
+            // maxADU>0  → pic ADU le plus proche de optimumADU dans [minADU,maxADU] (guidage).
             //
             // Retour :
             //   "X,Y,N"  → étoile valide trouvée ET GuideStarX/Y mis à jour (X,Y > 1)
@@ -224,13 +250,16 @@ namespace NinaTheSkyX.TheSkyX {
                 "function median(a){var b=[];for(var i=0;i<a.length;i++)b.push(a[i]);" +
                 "b.sort(function(p,q){return p-q;});var h=Math.floor(b.length/2);" +
                 "return (b.length%2)?b[h]:(b[h-1]+b[h])/2.0;}" +
-                // notSat(ls) : vrai si aucun pixel d'une boîte ~2*FWHM autour de l'étoile ls ne
-                // dépasse satMax (rejet des étoiles saturées → centroïde fiable pour la calibration).
-                "function notSat(ls){var r=Math.max(2,Math.floor(Fa[ls]*2+0.5));" +
+                // peakADU(ls) : pic (pixel max) dans une boîte ~2*FWHM autour de l'étoile ls.
+                // Lecture des pixels bruts via scanLine() → sert au rejet de saturation ET au
+                // critère ADU (étoile bien exposée mais non saturée pour le guidage).
+                "function peakADU(ls){var r=Math.max(2,Math.floor(Fa[ls]*2+0.5));" +
                 "var x0=Math.max(0,Math.floor(Xa[ls]-r)),x1=Math.min(W-1,Math.floor(Xa[ls]+r));" +
                 "var y0=Math.max(0,Math.floor(Ya[ls]-r)),y1=Math.min(H-1,Math.floor(Ya[ls]+r));" +
-                "for(var yy=y0;yy<=y1;yy++){var row=ccdsoftAutoguiderImage.scanLine(yy);" +
-                "for(var xx=x0;xx<=x1;xx++){if(row[xx]>satMax)return false;}}return true;}" +
+                "var mx=0;for(var yy=y0;yy<=y1;yy++){var row=ccdsoftAutoguiderImage.scanLine(yy);" +
+                "for(var xx=x0;xx<=x1;xx++){if(row[xx]>mx)mx=row[xx];}}return mx;}" +
+                // notSat(ls) : vrai si le pic ne dépasse pas le seuil de saturation satMax.
+                "function notSat(ls){return peakADU(ls)<=satMax;}" +
                 "var oldSave=ccdsoftAutoguider.AutoSaveOn;" +
                 "ccdsoftAutoguider.AutoSaveOn=1;" +
                 // Asynchronous=0 : rend TakeImage() SYNCHRONE — bloque jusqu'à fin d'exposition.
@@ -272,15 +301,29 @@ namespace NinaTheSkyX.TheSkyX {
                 $"var satMax=(Math.pow(2,bits)-1)*{satFrac};if(!(satMax>0))satMax=1e30;" +
                 // Seuils relatifs au champ : facteur × médiane (FWHM et ellipticité).
                 $"var maxF=median(Fa)*{fwhmFac},maxEl=median(Ea)*{ellipFac};" +
+                // Bornes ADU : maxA==0 → mode hérité (plus brillante non saturée) ;
+                // maxA>0 → sélection du pic le plus proche de optA dans [minA,maxA].
+                $"var minA={minAdu},maxA={maxAdu},optA={optAdu};" +
                 // Candidats : pas trop près du bord, FWHM dans plage absolue ET < facteur*médiane,
                 // ellipticité < facteur*médiane (rejette blobs, doubles, traînées, hot pixels).
                 "var cand=[];for(var i=0;i<n;i++){" +
                 "if(Xa[i]<mX||Xa[i]>W-mX||Ya[i]<mY||Ya[i]>H-mY)continue;" +
                 $"if(Fa[i]<{minFwhm}||Fa[i]>{maxFwhm}||Fa[i]>maxF)continue;" +
                 "if(Ea[i]>maxEl)continue;cand.push(i);}" +
-                // Plus brillant (magnitude mini) d'abord, puis 1er candidat NON saturé.
+                "var bi=-1;" +
+                "if(maxA>0){" +
+                // Mode ADU (guidage) : garder les candidats dont le pic ∈ [minA,maxA] et < satMax,
+                // puis retenir celui dont le pic est le plus proche de optA (|pic−optA| minimal).
+                "var bestD=-1;" +
+                "for(var c=0;c<cand.length;c++){var pk=peakADU(cand[c]);" +
+                "if(pk<minA||pk>maxA||pk>satMax)continue;" +
+                "var dd=Math.abs(pk-optA);" +
+                "if(bestD<0||dd<bestD){bestD=dd;bi=cand[c];}}" +
+                "}else{" +
+                // Mode hérité (calibration) : plus brillant (magnitude mini) d'abord, 1er NON saturé.
                 "cand.sort(function(a,b){return Ma[a]-Ma[b];});" +
-                "var bi=-1;for(var c=0;c<cand.length;c++){if(notSat(cand[c])){bi=cand[c];break;}}" +
+                "for(var c=0;c<cand.length;c++){if(notSat(cand[c])){bi=cand[c];break;}}" +
+                "}" +
                 "if(bi<0){Out=\"0,0,\"+n;}" +
                 "else{" +
                 // Unscale binning : GuideStarX/Y en coords capteur (TheSkyX rescale ensuite).
@@ -511,6 +554,172 @@ namespace NinaTheSkyX.TheSkyX {
                    $"ccdsoftAutoguider.Calibrate(0);" +
                    $"ccdsoftAutoguider.Subframe=false;" +
                    $"Out=0;";
+        }
+
+        // ---- Sauvegarde / restauration de calibration par côté (EXPÉRIMENTAL) -------
+        //
+        // ⚠⚠ NON VÉRIFIÉ SUR CIEL (2026-05-31). TheSkyX ne garde qu'UNE calibration active à
+        // la fois ; l'objectif est de mémoriser les paramètres de calibration de chaque côté du
+        // méridien (Est/Ouest) après le wizard, puis de les réécrire au Start Guiding selon la
+        // position de l'objet — pour éviter une recalibration après un meridian flip.
+        //
+        // Les noms de propriétés ci-dessous proviennent de la doc officielle Software Bisque
+        // (classccdsoft_camera-members.html, vérifiée 2026-05-31). CE QUI RESTE À CONFIRMER :
+        //   1. Que ces propriétés sont accessibles sur l'objet `ccdsoftAutoguider` (et non
+        //      uniquement sur `ccdsoftCamera` avec la propriété `Autoguider=1`).
+        //   2. Surtout : qu'elles sont **inscriptibles** par script (beaucoup de résultats de
+        //      calibration sont en lecture seule). La relecture après écriture tranchera.
+        // Utiliser `BuildDiagnoseCalibration()` depuis la console TheSkyX pour trancher ces points.
+
+        /// <summary>
+        /// Noms officiels (doc Bisque) des propriétés de calibration de l'autoguider à mémoriser.
+        /// Les 8 composantes du vecteur de calibration + temps de calibration X/Y + backlash X/Y +
+        /// temps de calibration sauvegardés + déclinaison à la calibration (la calibration dépend
+        /// de la déclinaison, d'où l'intérêt de la mémoriser par côté).
+        /// </summary>
+        internal static readonly string[] CalibrationPropertyNames = {
+            "CalibrationVectorXPositiveXComponent",
+            "CalibrationVectorXPositiveYComponent",
+            "CalibrationVectorXNegativeXComponent",
+            "CalibrationVectorXNegativeYComponent",
+            "CalibrationVectorYPositiveXComponent",
+            "CalibrationVectorYPositiveYComponent",
+            "CalibrationVectorYNegativeXComponent",
+            "CalibrationVectorYNegativeYComponent",
+            "AutoguiderCalibrationTimeXAxis",
+            "AutoguiderCalibrationTimeYAxis",
+            "AutoguiderBacklashXAxis",
+            "AutoguiderBacklashYAxis",
+            "SavedCalibrationTimeX",
+            "SavedCalibrationTimeY",
+            "DeclinationAtCalibration",
+        };
+
+        /// <summary>
+        /// Génère le corps JS qui lit toutes les propriétés de <see cref="CalibrationPropertyNames"/>
+        /// sur <c>ccdsoftAutoguider</c> et concatène le résultat sous forme <c>"clé=valeur;clé=valeur;…"</c>.
+        ///
+        /// <c>g(v)</c> protège des propriétés absentes (undefined / NaN → 0). Accès en notation
+        /// pointée (pas crochets) pour rester compatible avec le binding Qt Script de TheSkyX.
+        /// </summary>
+        private static string ReadCalibrationJsBody(bool includeCalibrationFlag) {
+            var sb = new StringBuilder();
+            sb.Append("function g(v){return (v==undefined||isNaN(v))?0:v;}var s=\"\";");
+            foreach (var p in CalibrationPropertyNames) {
+                sb.Append($"s+=\"{p}=\"+g(ccdsoftAutoguider.{p})+\";\";");
+            }
+            if (includeCalibrationFlag) {
+                sb.Append("s+=\"Calibration=\"+ccdsoftAutoguider.Calibration+\";\";");
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// ⚠ EXPÉRIMENTAL — Lit les paramètres de calibration courants de l'autoguider TheSkyX.
+        /// À appeler juste après une calibration réussie du wizard (côté Est ou Ouest) pour
+        /// mémoriser le blob retourné dans <c>PluginOptions.East/WestCalibrationData</c>.
+        ///
+        /// Retour (<c>Out</c>) : <c>"clé=valeur;clé=valeur;…"</c> (point décimal ECMAScript).
+        /// </summary>
+        public static string BuildReadCalibration()
+            => ReadCalibrationJsBody(includeCalibrationFlag: true) + "Out=s;";
+
+        /// <summary>
+        /// ⚠ EXPÉRIMENTAL (non vérifié sur ciel) — Réécrit les paramètres de calibration mémorisés
+        /// (<paramref name="calibrationBlob"/> produit par <see cref="BuildReadCalibration"/>) dans
+        /// <c>ccdsoftAutoguider</c>, force <c>Calibration=1</c>, puis <b>relit</b> toutes les
+        /// propriétés pour que l'appelant vérifie en C# que l'écriture a pris effet.
+        ///
+        /// Si TheSkyX ignore l'écriture (propriétés en lecture seule), la relecture ne correspondra
+        /// pas aux valeurs écrites → l'appelant doit alors recalibrer plutôt que guider à l'aveugle.
+        ///
+        /// Seules les clés de <see cref="CalibrationPropertyNames"/> sont réécrites (liste blanche) ;
+        /// toute clé inconnue ou valeur non numérique est ignorée.
+        /// </summary>
+        /// <param name="calibrationBlob">Blob <c>"clé=valeur;…"</c> mémorisé pour le côté courant.</param>
+        public static string BuildRestoreCalibration(string calibrationBlob) {
+            var sb = new StringBuilder();
+            foreach (var kv in ParseCalibrationBlob(calibrationBlob)) {
+                var v = kv.Value.ToString("R", CultureInfo.InvariantCulture);
+                sb.Append($"ccdsoftAutoguider.{kv.Key}={v};");
+            }
+            sb.Append("ccdsoftAutoguider.Calibration=1;");
+            // Relecture (même format que BuildReadCalibration) pour vérification C#.
+            sb.Append(ReadCalibrationJsBody(includeCalibrationFlag: true));
+            sb.Append("Out=s;");
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// ⚠ DIAGNOSTIC — À exécuter depuis la console de scripting TheSkyX (pas depuis NINA),
+        /// juste APRÈS une calibration réussie. Affiche la valeur de chaque propriété de calibration
+        /// puis teste leur <b>inscriptibilité</b> (écrit valeur+1, relit, restaure) sur 3 propriétés
+        /// représentatives. Permet de trancher si la stratégie save/restore par script est viable.
+        ///
+        /// Retour : rapport multi-ligne (valeurs + "writable=true/false" par propriété testée).
+        /// </summary>
+        public static string BuildDiagnoseCalibration() {
+            var sb = new StringBuilder();
+            sb.Append("var cr=\"\\n\";");
+            sb.Append("function g(v){return (v==undefined||isNaN(v))?0:v;}");
+            sb.Append("Out=\"=== DiagnoseCalibration (EXPERIMENTAL) ===\"+cr;");
+            sb.Append("Out+=\"Calibration=\"+ccdsoftAutoguider.Calibration+cr;");
+            // Dump : typeof (number = propriété lisible / function = méthode à appeler) + valeur.
+            foreach (var p in CalibrationPropertyNames) {
+                sb.Append($"Out+=\"{p}: type=\"+(typeof ccdsoftAutoguider.{p})+\" val=\"+g(ccdsoftAutoguider.{p})+cr;");
+            }
+            // Tests d'inscriptibilité (try/catch : une écriture qui lève est reportée, pas fatale).
+            sb.Append("try{var o1=g(ccdsoftAutoguider.AutoguiderCalibrationTimeXAxis);" +
+                      "ccdsoftAutoguider.AutoguiderCalibrationTimeXAxis=o1+1;" +
+                      "var r1=g(ccdsoftAutoguider.AutoguiderCalibrationTimeXAxis);" +
+                      "ccdsoftAutoguider.AutoguiderCalibrationTimeXAxis=o1;" +
+                      "Out+=\"AutoguiderCalibrationTimeXAxis writable=\"+(Math.abs(r1-(o1+1))<0.5)+cr;}" +
+                      "catch(e1){Out+=\"AutoguiderCalibrationTimeXAxis writable=ERROR(\"+e1+\")\"+cr;}");
+            sb.Append("try{var o2=g(ccdsoftAutoguider.CalibrationVectorXPositiveXComponent);" +
+                      "ccdsoftAutoguider.CalibrationVectorXPositiveXComponent=o2+1;" +
+                      "var r2=g(ccdsoftAutoguider.CalibrationVectorXPositiveXComponent);" +
+                      "ccdsoftAutoguider.CalibrationVectorXPositiveXComponent=o2;" +
+                      "Out+=\"CalibrationVectorXPositiveXComponent writable=\"+(Math.abs(r2-(o2+1))<0.5)+cr;}" +
+                      "catch(e2){Out+=\"CalibrationVectorXPositiveXComponent writable=ERROR(\"+e2+\")\"+cr;}");
+            sb.Append("try{var o3=g(ccdsoftAutoguider.DeclinationAtCalibration);" +
+                      "ccdsoftAutoguider.DeclinationAtCalibration=o3+1;" +
+                      "var r3=g(ccdsoftAutoguider.DeclinationAtCalibration);" +
+                      "ccdsoftAutoguider.DeclinationAtCalibration=o3;" +
+                      "Out+=\"DeclinationAtCalibration writable=\"+(Math.abs(r3-(o3+1))<0.5)+cr;}" +
+                      "catch(e3){Out+=\"DeclinationAtCalibration writable=ERROR(\"+e3+\")\"+cr;}");
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Parse un blob <c>"clé=valeur;clé=valeur;…"</c> produit par <see cref="BuildReadCalibration"/>.
+        /// Ne retourne que les clés présentes dans <see cref="CalibrationPropertyNames"/> (liste blanche)
+        /// dont la valeur est un double valide (point décimal, <see cref="CultureInfo.InvariantCulture"/>).
+        /// Robuste aux blobs nuls/vides/partiels (retourne ce qui est valide).
+        /// </summary>
+        internal static IEnumerable<KeyValuePair<string, double>> ParseCalibrationBlob(string blob) {
+            var result = new List<KeyValuePair<string, double>>();
+            if (string.IsNullOrWhiteSpace(blob)) {
+                return result;
+            }
+            var known = new HashSet<string>(CalibrationPropertyNames, StringComparer.Ordinal);
+            foreach (var pair in blob.Split(';')) {
+                if (string.IsNullOrWhiteSpace(pair)) {
+                    continue;
+                }
+                var eq = pair.IndexOf('=');
+                if (eq <= 0) {
+                    continue;
+                }
+                var key = pair.Substring(0, eq).Trim();
+                var val = pair.Substring(eq + 1).Trim();
+                if (!known.Contains(key)) {
+                    continue;
+                }
+                if (double.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out var d)) {
+                    result.Add(new KeyValuePair<string, double>(key, d));
+                }
+            }
+            return result;
         }
 
         /// <summary>

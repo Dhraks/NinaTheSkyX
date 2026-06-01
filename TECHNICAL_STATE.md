@@ -104,16 +104,24 @@ NinaTheSkyX.Tests/
 
 ### Phases suivantes — À FAIRE
 
-> **PROCHAINE ACTION → Phase 6 : intégration "Start Guiding".**
-> Prompt détaillé : **`PROMPT_Phase6_StartGuiding.md`** (racine du repo).
+> **PROCHAINE ACTION → Phase 6 : VALIDATION SUR CIEL.** Le code est livré (2026-05-31).
+> Étapes ciel : (1) exécuter `BuildDiagnoseCalibration()` depuis la console TheSkyX après une
+> calibration pour confirmer si les propriétés de calibration sont **inscriptibles** par script
+> (sinon basculer sur le fallback recalibration) ; (2) régler `GuideStarMin/Optimum/MaxADU` selon
+> la caméra guide (voir pic ADU dans les logs `[TheSkyX]`) ; (3) tester un Start Guiding complet
+> de chaque côté du méridien. Prompt détaillé : **`PROMPT_Phase6_StartGuiding.md`**.
 
 - ✅ **Sélection étoile guide automatique** — FAIT, confirmé ciel 2026-05-31 (cf. ci-dessus :
   `ccdsoftAutoguiderImage`, filtres robustes, marge de bord calibration-safe, écriture+relecture GuideStarX/Y).
-- ⏭ **Phase 6 — Start Guiding** : sur l'instruction NINA "Start Guiding", avant de guider :
-  (1) sélectionner le bon **fichier de calibration** selon la position de l'objet (Est/Ouest) ;
-  (2) prendre une image guide + sélectionner une étoile **NON saturée** par critère **ADU**
-  (intervalle min/max + ADU optimum, à ajouter aux options) ; (3) lancer le guidage.
-  → `PROMPT_Phase6_StartGuiding.md`.
+- 🟡 **Phase 6 — Start Guiding** : **code livré 2026-05-31, à valider sur ciel.**
+  `TheSkyXGuider.StartGuiding()` orchestre désormais : (1) détection du côté méridien
+  (HA = LST−RA via `Plugin.TelescopeMediator.GetInfo()`) ; (2) restauration de la calibration
+  mémorisée pour ce côté (**EXPÉRIMENTAL**, `BuildRestoreCalibration` + vérif par relecture) ;
+  (3) sélection d'une étoile **NON saturée** par critère **ADU** (`BuildAutoSelectGuideStar` mode
+  ADU) ; (4) `Autoguide()`. Si aucune étoile valide → statut clair, pas de démarrage. La capture
+  de calibration par côté est faite à la fin du wizard (`TryCaptureCalibrationDataAsync`).
+  Options ajoutées : `GuideStarMinADU` (8000), `GuideStarMaxADU` (45000), `GuideStarOptimumADU` (25000),
+  `East/WestCalibrationData`. **Reste : validation ciel** (inscriptibilité calibration + réglage ADU).
 
 Autres phases (voir `PROMPTS_TheSkyX_Next_Phases.md`) :
 1. **RMS guiding** — récupérer l'erreur RMS de guidage pour conditionner le lancement des poses
@@ -181,6 +189,10 @@ L'utilisateur **peut toujours cliquer manuellement une autre étoile** dans TheS
 | `BuildDither(arcsec)` | `sky6RASCOMTele.Jog(v,'East');Jog(v,'North');Out=0;` | ✅ |
 | `BuildJogRA(arcsec)` | `sky6RASCOMTele.Jog(v,'East'\|'West');Out=0;` | ✅ |
 | `BuildAutoSelectGuideStar(exp, minFwhm, maxFwhm, fwhmFac, ellipFac, satFrac)` | `ccdsoftAutoguiderImage` : ShowInventory + filtres (bord/FWHM/ellipticité-médiane, saturation scanLine+BITPIX) + unscale binning + écriture/relecture GuideStarX/Y. Retour `"X,Y,N"\|"0,0,N"\|"0,0,0"` | 🛡️ Robuste 2026-05-30, **à confirmer sur ciel réel** |
+| `BuildAutoSelectGuideStar(..., minADU, maxADU, optimumADU)` | mode ADU ajouté 2026-05-31 : `maxADU>0` → pic ADU (`peakADU`) le plus proche de `optimumADU` dans `[minADU,maxADU]`. `maxADU=0` → comportement hérité | 🟡 mode ADU à confirmer ciel |
+| `BuildReadCalibration()` | lit les propriétés de calibration → blob `"clé=valeur;…"` | 🟡 EXPÉRIMENTAL, non vérifié ciel |
+| `BuildRestoreCalibration(blob)` | réécrit le blob + `Calibration=1` + relecture pour vérif C# | 🟡 EXPÉRIMENTAL, non vérifié ciel |
+| `BuildDiagnoseCalibration()` | dump + test d'inscriptibilité (console TheSkyX) | 🟡 outil de validation ciel |
 | `BuildAutoFindGuideStar()` | — | ❌ [Obsolete] — N'existe pas. Voir `BuildAutoSelectGuideStar()` |
 | `BuildCenterBrightestObject()` | `ccdsoftAutoguider.CenterBrightestObject();Out=0;` | ❌ [Obsolete] — Test réel 2026-05-22 : centrage physique de monture, pas sélection d'étoile |
 
@@ -227,6 +239,11 @@ Ouest (HA = +2h) : offsetH = −2h → RA = LST − 2h  ✅
 | `ccdsoftAutoguider.SubframeLeft/Top/Right/Bottom` | ✅ Confirmé | Coordonnées absolues (pas Width/Height) |
 | `ccdsoftCameraImage.AttachToActiveAutoguider()` | ✅ Confirmé | Doc + ShowInventory.js (2026-05-20) |
 | `ccdsoftCameraImage.AutoContrast(Method,Bg,HL)` | ✅ Confirmé | Enums : Bjorn=1, BgWeak=1, HLStrong=3 |
+| `ccdsoftAutoguider.CalibrationVector{X,Y}{Positive,Negative}{X,Y}Component` (8) | ✅ read+write confirmé ciel 2026-06-01 | `type=number`, valeurs réelles (ex. ±17…81), `writable=true`. Composantes du vecteur de calibration |
+| `ccdsoftAutoguider.AutoguiderCalibrationTime{X,Y}Axis` | ✅ read+write confirmé ciel 2026-06-01 | Ex. 20000 (unités 1/100 s). writable=true |
+| `ccdsoftAutoguider.{AutoguiderBacklash{X,Y}Axis, SavedCalibrationTime{X,Y}, DeclinationAtCalibration}` | ✅ read+write confirmé ciel 2026-06-01 | Backlash=0, SavedT=20000, DecAtCal≈0 (calib à Dec 0). writable=true |
+| `ccdsoftAutoguider.Calibration` (lecture) | ⚠ undefined en lecture (2026-06-01) | Écriture =0/1 probablement effective mais non relisible. Restore vérifié via les 15 propriétés numériques |
+| `TelescopeInfo` (NINA) : `Connected, SiderealTime, RightAscension, Coordinates, SideOfPier, HoursToMeridian` | ✅ Confirmé décompil. NINA.Equipment 3.2.0.9001 | Côté méridien = HA = LST−RA (HA<0 Est, ≥0 Ouest) |
 
 ---
 
@@ -242,6 +259,11 @@ Ouest (HA = +2h) : offsetH = −2h → RA = LST − 2h  ✅
 | `DebugLogging` | false | — | Activation des logs DEBUG |
 | `LastEastCalibrationAt` | null | DateTime? | Horodatage de la dernière calibration Est (ISO-8601) |
 | `LastWestCalibrationAt` | null | DateTime? | Horodatage de la dernière calibration Ouest (ISO-8601) |
+| `GuideStarMinADU` | 8000 | 0–65535 | Pic ADU min de l'étoile guide (sélection ADU Phase 6) |
+| `GuideStarMaxADU` | 45000 | 0–65535 | Pic ADU max acceptable (sous saturation) |
+| `GuideStarOptimumADU` | 25000 | 0–65535 | Pic ADU cible (le candidat le plus proche est retenu) |
+| `EastCalibrationData` | "" | string | Blob calibration TheSkyX côté Est (Phase 6, EXPÉRIMENTAL) |
+| `WestCalibrationData` | "" | string | Blob calibration TheSkyX côté Ouest (Phase 6, EXPÉRIMENTAL) |
 
 ---
 

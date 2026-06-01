@@ -4,8 +4,10 @@ using NINA.Core.Model;
 using NINA.Core.Utility;
 using NINA.Equipment.Equipment.MyGuider;
 using NINA.Equipment.Interfaces;
+using NinaTheSkyX.Options;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -23,14 +25,37 @@ namespace NinaTheSkyX.TheSkyX {
     public class TheSkyXGuider : BaseINPC, IGuider {
 
         private readonly TheSkyXTcpClient _client;
+        private readonly PluginOptions _options;
+        private readonly string _host;
+        private readonly int _port;
         private readonly double _exposureSeconds;
         private readonly bool _debug;
 
-        public TheSkyXGuider(string host, int port, double exposureSeconds, bool debug) {
-            _client          = new TheSkyXTcpClient(host, port);
-            _exposureSeconds = exposureSeconds;
-            _debug           = debug;
+        /// <summary>Timeout étendu pour le lancement du guidage : Autoguide() est bloquant côté TheSkyX
+        /// (peut recalibrer si le côté du méridien a changé).</summary>
+        private static readonly TimeSpan StartGuidingTimeout = TimeSpan.FromMinutes(10);
+
+        /// <summary>Timeout pour la sélection d'étoile / restauration de calibration (prise de vue + inventaire).</summary>
+        private static readonly TimeSpan SelectStarTimeout = TimeSpan.FromMinutes(2);
+
+        /// <summary>Fenêtre pendant laquelle une sélection d'étoile récente est réutilisée
+        /// (évite une double prise de vue quand NINA appelle AutoSelectGuideStar() puis StartGuiding()).</summary>
+        private static readonly TimeSpan ReselectGuard = TimeSpan.FromSeconds(45);
+
+        private DateTime _lastStarSelectUtc = DateTime.MinValue;
+
+        public TheSkyXGuider(PluginOptions options) {
+            _options         = options ?? throw new ArgumentNullException(nameof(options));
+            _host            = options.TheSkyXHost;
+            _port            = options.TheSkyXPort;
+            _exposureSeconds = options.TheSkyXGuideExposureSeconds;
+            _debug           = options.DebugLogging;
+            _client          = new TheSkyXTcpClient(_host, _port);
         }
+
+        /// <summary>Crée un client TCP éphémère (timeout optionnel) vers le même serveur TheSkyX.</summary>
+        private TheSkyXTcpClient CreateClient(TimeSpan? timeout = null)
+            => new TheSkyXTcpClient(_host, _port, timeout);
 
         // ---- IDevice : identité ------------------------------------------
 
@@ -124,18 +149,54 @@ namespace NinaTheSkyX.TheSkyX {
 
         // ---- Guidage -----------------------------------------------------
 
+        /// <summary>
+        /// Démarrage « sans intervention » du guidage (Phase 6) :
+        /// <list type="number">
+        ///   <item>applique la calibration mémorisée pour le côté du méridien de l'objet
+        ///     (Est/Ouest) — sauf si <paramref name="forceCalibration"/> (on laisse alors
+        ///     Autoguide() recalibrer) ;</item>
+        ///   <item>prend une image guide et sélectionne automatiquement une étoile NON saturée
+        ///     selon le critère ADU (min / optimum / max des options) ;</item>
+        ///   <item>lance le guidage via <c>Autoguide()</c>.</item>
+        /// </list>
+        /// Si aucune étoile ne satisfait le critère ADU, le guidage <b>n'est pas démarré</b> et un
+        /// statut clair est remonté (évite un démarrage silencieux voué à l'échec).
+        /// </summary>
         public async Task<bool> StartGuiding(bool forceCalibration,
                                              IProgress<ApplicationStatus> progress,
                                              CancellationToken ct) {
             try {
-                progress?.Report(new ApplicationStatus { Status = "TheSkyX : démarrage du guidage..." });
+                progress?.Report(new ApplicationStatus { Status = "TheSkyX : préparation du guidage..." });
 
+                // 1) Calibration selon le côté du méridien (expérimental). En recalibration forcée,
+                //    on ne restaure rien : Autoguide() recalibrera (Calibration=1).
+                if (!forceCalibration) {
+                    await TryApplyCalibrationForCurrentSideAsync(progress, ct);
+                } else if (_debug) {
+                    Logger.Info("[TheSkyX] forceCalibration=true → recalibration laissée à Autoguide(), pas de restauration.");
+                }
+
+                // 2) Sélection auto d'une étoile guide NON saturée par critère ADU.
+                bool starOk = await EnsureGuideStarSelectedAsync(progress, ct);
+                if (!starOk) {
+                    const string msg = "TheSkyX : aucune étoile guide valide (critère ADU) — guidage NON démarré.";
+                    progress?.Report(new ApplicationStatus { Status = msg });
+                    Logger.Warning("[TheSkyX] " + msg +
+                        " Ajuster ADU min/optimum/max dans les options, ou sélectionner une étoile manuellement.");
+                    return false;
+                }
+
+                // 3) Lancement du guidage.
+                progress?.Report(new ApplicationStatus { Status = "TheSkyX : démarrage du guidage..." });
                 var script = TheSkyXScriptBuilder.BuildStartGuiding(_exposureSeconds, forceCalibration);
-                await _client.ExecuteAsync(script, ct);
+                await CreateClient(StartGuidingTimeout).ExecuteAsync(script, ct);
 
                 State = "Guiding";
-                if (_debug) Logger.Info($"[TheSkyX] Guidage démarré (calibration={forceCalibration}).");
+                if (_debug) Logger.Info($"[TheSkyX] Guidage démarré (recalibration forcée={forceCalibration}).");
                 return true;
+            } catch (OperationCanceledException) {
+                Logger.Info("[TheSkyX] StartGuiding annulé.");
+                return false;
             } catch (Exception ex) {
                 Logger.Error("[TheSkyX] StartGuiding a échoué", ex);
                 return false;
@@ -176,11 +237,174 @@ namespace NinaTheSkyX.TheSkyX {
             }
         }
 
-        public Task<bool> AutoSelectGuideStar() {
-            // TheSkyX sélectionne l'étoile guide pendant la calibration ;
-            // rien à faire côté NINA. Note : signature sans CancellationToken
-            // dans NINA 3.x.
-            return Task.FromResult(true);
+        /// <summary>
+        /// Sélection auto de l'étoile guide (appelée par NINA, parfois juste avant
+        /// <see cref="StartGuiding"/>). Prend une image guide et sélectionne une étoile NON saturée
+        /// par critère ADU. Note : signature sans CancellationToken dans NINA 3.x.
+        /// </summary>
+        public async Task<bool> AutoSelectGuideStar() {
+            try {
+                return await EnsureGuideStarSelectedAsync(progress: null, ct: CancellationToken.None);
+            } catch (Exception ex) {
+                Logger.Error("[TheSkyX] AutoSelectGuideStar a échoué", ex);
+                return false;
+            }
+        }
+
+        // ---- Helpers Phase 6 : sélection ADU + calibration par côté ----------
+
+        private enum MeridianSide { Unknown, East, West }
+
+        /// <summary>
+        /// Prend une image guide et sélectionne automatiquement une étoile NON saturée selon le
+        /// critère ADU (options Min/Optimum/Max). Réutilise une sélection récente (&lt; <see cref="ReselectGuard"/>)
+        /// pour éviter une double prise de vue. Retourne true si une étoile valide a été écrite dans
+        /// GuideStarX/Y (vérifié par relecture côté script).
+        /// </summary>
+        private async Task<bool> EnsureGuideStarSelectedAsync(IProgress<ApplicationStatus> progress,
+                                                              CancellationToken ct) {
+            if ((DateTime.UtcNow - _lastStarSelectUtc) < ReselectGuard) {
+                if (_debug) Logger.Info("[TheSkyX] Étoile guide déjà sélectionnée récemment — nouvelle sélection ignorée.");
+                return true;
+            }
+
+            progress?.Report(new ApplicationStatus { Status = "TheSkyX : sélection auto de l'étoile guide (ADU)..." });
+
+            // Marge de bord cohérente avec le wizard (couvre la track box pendant le guidage).
+            int edgeMargin = _options.TheSkyXGuiderSubframeSize / 2 + 20;
+
+            var script = TheSkyXScriptBuilder.BuildAutoSelectGuideStar(
+                exposureSeconds: _exposureSeconds,
+                edgeMarginPx:    edgeMargin,
+                minADU:          _options.GuideStarMinADU,
+                maxADU:          _options.GuideStarMaxADU,
+                optimumADU:      _options.GuideStarOptimumADU);
+
+            string raw;
+            try {
+                raw = await CreateClient(SelectStarTimeout).ExecuteAsync(script, ct);
+            } catch (OperationCanceledException) {
+                throw;
+            } catch (Exception ex) {
+                Logger.Error("[TheSkyX] Sélection auto de l'étoile guide a échoué", ex);
+                return false;
+            }
+
+            // Réponse "X,Y,N" : X,Y = coords étoile (0,0 si aucune valide) ; N = sources détectées.
+            double x = 0.0, y = 0.0; int n = 0;
+            var parts = (raw ?? string.Empty).Split(',');
+            if (parts.Length >= 3) {
+                double.TryParse(parts[0].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out x);
+                double.TryParse(parts[1].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out y);
+                int.TryParse(parts[2].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out n);
+            }
+
+            if (x >= 1.0 || y >= 1.0) {
+                _lastStarSelectUtc = DateTime.UtcNow;
+                if (_debug) {
+                    Logger.Info($"[TheSkyX] Étoile guide sélectionnée : X={x.ToString("F1", CultureInfo.InvariantCulture)}, " +
+                                $"Y={y.ToString("F1", CultureInfo.InvariantCulture)} px ({n} sources ; " +
+                                $"ADU [{_options.GuideStarMinADU}–{_options.GuideStarMaxADU}], optimum {_options.GuideStarOptimumADU}).");
+                }
+                return true;
+            }
+
+            Logger.Warning($"[TheSkyX] Aucune étoile guide ne satisfait le critère ADU " +
+                           $"[{_options.GuideStarMinADU}–{_options.GuideStarMaxADU}] (réponse '{raw}', {n} sources détectées).");
+            return false;
+        }
+
+        /// <summary>
+        /// ⚠ EXPÉRIMENTAL (non vérifié sur ciel) — détermine le côté du méridien de l'objet via NINA
+        /// et réécrit la calibration TheSkyX mémorisée pour ce côté, avec vérification par relecture.
+        /// Non bloquant : en cas d'échec (côté inconnu, blob vide, propriétés en lecture seule), on
+        /// conserve la calibration active de TheSkyX et on logue clairement.
+        /// </summary>
+        private async Task TryApplyCalibrationForCurrentSideAsync(IProgress<ApplicationStatus> progress,
+                                                                  CancellationToken ct) {
+            var side = DetermineMeridianSide();
+            if (side == MeridianSide.Unknown) {
+                Logger.Warning("[TheSkyX] Côté du méridien indéterminé (monture non connectée dans NINA ?) — " +
+                               "calibration TheSkyX active conservée.");
+                return;
+            }
+
+            var sideStr = side == MeridianSide.East ? "Est" : "Ouest";
+            var blob = side == MeridianSide.East ? _options.EastCalibrationData : _options.WestCalibrationData;
+            if (string.IsNullOrWhiteSpace(blob)) {
+                Logger.Warning($"[TheSkyX] Aucune calibration mémorisée côté {sideStr} — calibration active conservée " +
+                               $"(calibrer ce côté avec le wizard pour activer la restauration auto).");
+                return;
+            }
+
+            progress?.Report(new ApplicationStatus { Status = $"TheSkyX : restauration calibration {sideStr} (expérimental)..." });
+
+            try {
+                var raw = await CreateClient(SelectStarTimeout).ExecuteAsync(
+                    TheSkyXScriptBuilder.BuildRestoreCalibration(blob), ct);
+
+                if (VerifyCalibrationApplied(blob, raw)) {
+                    if (_debug) Logger.Info($"[TheSkyX] Calibration {sideStr} restaurée et vérifiée (relecture conforme).");
+                } else {
+                    Logger.Warning($"[TheSkyX] ⚠ Restauration calibration {sideStr} NON confirmée par relecture — " +
+                                   $"propriétés probablement en lecture seule. Le guidage utilisera la calibration active de " +
+                                   $"TheSkyX (recalibrer si le côté a changé). Réponse : '{raw}'.");
+                }
+            } catch (OperationCanceledException) {
+                throw;
+            } catch (Exception ex) {
+                Logger.Warning($"[TheSkyX] Restauration calibration {sideStr} échouée (non bloquant) : {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Côté du méridien de l'objet pointé, via <see cref="Plugin.TelescopeMediator"/>.
+        /// HA = LST − RA (heures) ; HA &lt; 0 = EST, HA ≥ 0 = OUEST (cf. TECHNICAL_STATE « Formule de pointage RA »).
+        /// Retourne Unknown si la monture n'est pas connectée dans NINA.
+        /// </summary>
+        private static MeridianSide DetermineMeridianSide() {
+            try {
+                var mediator = Plugin.TelescopeMediator;
+                if (mediator == null) return MeridianSide.Unknown;
+
+                var info = mediator.GetInfo();
+                if (info == null || !info.Connected) return MeridianSide.Unknown;
+
+                double lst = info.SiderealTime;     // heures
+                double ra  = info.RightAscension;   // heures (pointage courant)
+                double ha  = lst - ra;
+                while (ha < -12.0) ha += 24.0;
+                while (ha >= 12.0) ha -= 24.0;
+
+                return ha < 0.0 ? MeridianSide.East : MeridianSide.West;
+            } catch {
+                return MeridianSide.Unknown;
+            }
+        }
+
+        /// <summary>
+        /// Compare le blob écrit et le blob relu (retournés par BuildRestoreCalibration) : vrai si
+        /// toutes les valeurs écrites se retrouvent dans la relecture à une tolérance relative près.
+        /// Faux si une clé manque ou diverge (= écriture ignorée par TheSkyX, propriétés en lecture seule).
+        /// </summary>
+        private static bool VerifyCalibrationApplied(string writtenBlob, string readbackBlob) {
+            var written = new Dictionary<string, double>(StringComparer.Ordinal);
+            foreach (var kv in TheSkyXScriptBuilder.ParseCalibrationBlob(writtenBlob)) {
+                written[kv.Key] = kv.Value;
+            }
+            if (written.Count == 0) return false;
+
+            var read = new Dictionary<string, double>(StringComparer.Ordinal);
+            foreach (var kv in TheSkyXScriptBuilder.ParseCalibrationBlob(readbackBlob)) {
+                read[kv.Key] = kv.Value;
+            }
+
+            foreach (var kv in written) {
+                if (!read.TryGetValue(kv.Key, out var rv)) return false;
+                var tol = Math.Max(1e-6, Math.Abs(kv.Value) * 1e-3);
+                if (Math.Abs(rv - kv.Value) > tol) return false;
+            }
+            return true;
         }
 
         public async Task<bool> ClearCalibration(CancellationToken ct) {

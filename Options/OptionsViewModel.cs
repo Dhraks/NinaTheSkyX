@@ -47,6 +47,23 @@ namespace NinaTheSkyX.Options {
             set { _options.TheSkyXGuiderSubframeSize = value; RaisePropertyChanged(); }
         }
 
+        // ---- Sélection d'étoile guide par ADU (Phase 6) ------------------
+
+        public int GuideStarMinADU {
+            get => _options.GuideStarMinADU;
+            set { _options.GuideStarMinADU = value; RaisePropertyChanged(); }
+        }
+
+        public int GuideStarMaxADU {
+            get => _options.GuideStarMaxADU;
+            set { _options.GuideStarMaxADU = value; RaisePropertyChanged(); }
+        }
+
+        public int GuideStarOptimumADU {
+            get => _options.GuideStarOptimumADU;
+            set { _options.GuideStarOptimumADU = value; RaisePropertyChanged(); }
+        }
+
         public bool DebugLogging {
             get => _options.DebugLogging;
             set { _options.DebugLogging = value; RaisePropertyChanged(); }

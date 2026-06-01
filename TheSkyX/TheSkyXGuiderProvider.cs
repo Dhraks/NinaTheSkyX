@@ -28,11 +28,7 @@ namespace NinaTheSkyX.TheSkyX {
         public IList<IGuider> GetEquipment() {
             var options = new PluginOptions(_profileService);
             return new List<IGuider> {
-                new TheSkyXGuider(
-                    options.TheSkyXHost,
-                    options.TheSkyXPort,
-                    options.TheSkyXGuideExposureSeconds,
-                    options.DebugLogging)
+                new TheSkyXGuider(options)
             };
         }
     }
